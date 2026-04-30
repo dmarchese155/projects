@@ -7,8 +7,9 @@ CARD_VALUES = {
 SUITS = {
     "Hearts", "Spades", "Diamonds", "Clubs"
 }
+
 class Card():
-    def __init__(self, suit: str, name: int | str):
+    def __init__(self, suit, name):
         self.suit = suit
         self.name = name
         self.alt_value = None
@@ -22,8 +23,6 @@ class Card():
         else:
             self.value = int(self.name)
 
-        
-    
     def __repr__(self):
         return f"This is the {self.name} of {self.suit}"
 
@@ -31,10 +30,11 @@ class Card():
         return f"{self.name} of {self.suit}"
 
 class Deck():
-    def __init__(self, quantity: int):
-        self.card_order = self.generate_deck(quantity)
+    def __init__(self, quantity):
+        self.card_order = []
+        self.generate_deck(quantity)
 
-    def generate_deck(quantity: int):
+    def generate_deck(self, quantity):
         for _ in range(quantity):
             for suit in SUITS:
                 for card in CARD_VALUES:
