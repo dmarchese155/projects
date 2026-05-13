@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Every Opening</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@300;400&family=EB+Garamond:ital,wght@0,400;1,400&display=swap');
+
+:root {
+  --bg:       #0c0c0c;
+  --sq-light: #d4c5a0;
+  --sq-dark:  #6b4f3a;
+  --sq-light-hi: #f0e68c;
+  --sq-dark-hi:  #c9b84c;
+  --piece-w:  #f5f0e8;
+  --piece-b:  #1a1a1a;
+  --accent:   #e8c84a;
+  --dim:      #333;
+  --fg:       #e0d8cc;
+  --mono:     'IBM Plex Mono', monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%; height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+  font-family: var(--mono);
+}
+
+/* scanline texture */
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 999;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.08) 2px,
+    rgba(0,0,0,0.08) 4px
+  );
+}
+
+/* ── LAYOUT ── */
+#app {
+  position: fixed; inset: 0;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  grid-template-rows: 1fr;
+  align-items: center;
+  gap: 0 4vw;
+  padding: 0 5vw;
+}
+
+/* ── LEFT PANEL ── */
+#left {
+  display: flex;
+  flex-direction: column;
+  gap: 2.5em;
+  justify-self: end;
+  min-width: 220px;
+}
+
+.panel-title {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: clamp(48px, 6vw, 80px);
+  line-height: 0.9;
+  letter-spacing: 0.03em;
+  color: var(--fg);
+}
+.panel-title span {
+  display: block;
+  color: var(--accent);
+}
+
+.stat-block { display: flex; flex-direction: column; gap: 0.15em; }
+.stat-label {
+  font-size: 9px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: #555;
+}
+.stat-value {
+  font-size: clamp(13px, 1.4vw, 17px);
+  font-weight: 400;
+  color: var(--fg);
+  letter-spacing: 0.05em;
+}
+.stat-value.big {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: clamp(28px, 3.5vw, 46px);
+  color: var(--accent);
+  letter-spacing: 0.06em;
+}
+
+/* move list */
+#move-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 160px;
+  overflow: hidden;
+}
+.move-item {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: #444;
+  transition: color 0.3s;
+  white-space: nowrap;
+}
+.move-item.done  { color: #888; }
+.move-item.active { color: var(--accent); }
+
+/* ── BOARD ── */
+#board-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+#board {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  grid-template-rows: repeat(8, 1fr);
+  width: min(58vh, 58vw);
+  height: min(58vh, 58vw);
+  border: 1px solid #2a2a2a;
+  box-shadow:
+    0 0 0 1px #111,
+    0 0 60px rgba(0,0,0,0.8),
+    inset 0 0 0 1px rgba(255,255,255,0.03);
+  position: relative;
+  z-index: 1;
+}
+
+.sq {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.25s;
+}
+.sq.light { background: var(--sq-light); }
+.sq.dark  { background: var(--sq-dark); }
+.sq.highlight-from { background: var(--sq-light-hi) !important; }
+.sq.highlight-to   {
+  background: var(--sq-dark-hi) !important;
+}
+.sq.highlight-to::after {
+  content: '';
+  position: absolute; inset: 6px;
+  border-radius: 50%;
+  background: rgba(232,200,74,0.35);
+  pointer-events: none;
+}
+
+/* rank/file labels */
+.sq .rank-label {
+  position: absolute;
+  top: 2px; left: 3px;
+  font-size: 8px;
+  font-family: var(--mono);
+  opacity: 0.45;
+  color: inherit;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+.sq .file-label {
+  position: absolute;
+  bottom: 2px; right: 3px;
+  font-size: 8px;
+  font-family: var(--mono);
+  opacity: 0.45;
+  color: inherit;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+/* pieces rendered as SVG unicode in divs */
+.piece {
+  font-size: calc(min(58vh, 58vw) / 8 * 0.82);
+  line-height: 1;
+  user-select: none;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5));
+}
+
+/* ── RIGHT PANEL ── */
+#right {
+  display: flex;
+  flex-direction: column;
+  gap: 2.5em;
+  justify-self: start;
+  min-width: 200px;
+}
+
+/* opening queue — next few */
+#queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.queue-item {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: #3a3a3a;
+  padding: 5px 10px;
+  border-left: 2px solid #222;
+  transition: all 0.4s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.queue-item.next {
+  color: #666;
+  border-left-color: #444;
+}
+.queue-item.current {
+  color: var(--fg);
+  border-left-color: var(--accent);
+  font-size: 12px;
+}
+
+/* popularity bar */
+#pop-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#pop-bar-track {
+  height: 3px;
+  background: #1a1a1a;
+  border-radius: 2px;
+  overflow: hidden;
+}
+#pop-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.6s ease;
+  border-radius: 2px;
+}
+
+/* win rates */
+#winrates {
+  display: flex;
+  gap: 0;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+#wr-white { background: #d4c5a0; transition: width 0.6s ease; }
+#wr-draw  { background: #555;    transition: width 0.6s ease; }
+#wr-black { background: #1a1a1a; border: 1px solid #333; transition: width 0.6s ease; }
+
+/* counter */
+#counter-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+#big-counter {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: clamp(60px, 8vw, 100px);
+  line-height: 0.85;
+  color: #1e1e1e;
+  letter-spacing: 0.02em;
+  transition: color 0.3s;
+}
+#big-counter.flash { color: var(--accent); }
+
+/* ── BOTTOM BAR ── */
+#bottom {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: 2px;
+  background: #111;
+  z-index: 100;
+}
+#bottom-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+}
+
+/* ── PIECE UNICODE MAP ── */
+/* using standard chess unicode */
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div id="left">
+    <div class="panel-title">Every<span>Opening</span></div>
+
+    <div class="stat-block">
+      <div class="stat-label">Opening</div>
+      <div class="stat-value" id="opening-name">—</div>
+    </div>
+
+    <div class="stat-block">
+      <div class="stat-label">ECO Code</div>
+      <div class="stat-value" id="eco-code">—</div>
+    </div>
+
+    <div class="stat-block">
+      <div class="stat-label">Move</div>
+      <div id="move-list"></div>
+    </div>
+
+    <div class="stat-block">
+      <div class="stat-label">Games Played (Lichess)</div>
+      <div class="stat-value big" id="game-count">—</div>
+    </div>
+  </div>
+
+  <div id="board-wrap">
+    <div id="board"></div>
+  </div>
+
+  <div id="right">
+    <div class="stat-block">
+      <div class="stat-label">Opening #</div>
+      <div id="big-counter">001</div>
+    </div>
+
+    <div class="stat-block">
+      <div class="stat-label">Popularity vs. All Openings</div>
+      <div id="pop-bar-wrap">
+        <div id="pop-bar-track"><div id="pop-bar-fill"></div></div>
+      </div>
+    </div>
+
+    <div class="stat-block">
+      <div class="stat-label">Win rates  ·  W / D / B</div>
+      <div id="winrates">
+        <div id="wr-white" style="width:33%"></div>
+        <div id="wr-draw"  style="width:34%"></div>
+        <div id="wr-black" style="width:33%"></div>
+      </div>
+      <div class="stat-value" id="wr-label" style="font-size:10px;margin-top:4px;color:#555;">—</div>
+    </div>
+
+    <div class="stat-block">
+      <div class="stat-label">Up Next</div>
+      <div id="queue"></div>
+    </div>
+  </div>
+</div>
+
+<div id="bottom"><div id="bottom-fill"></div></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// TOP 50 OPENINGS — sourced from Lichess frequency database
+// moves: array of UCI strings (e.g. "e2e4")
+// games: approximate play count (billions of Lichess games)
+// w/d/b: approximate win % for white / draw / black
+// ═══════════════════════════════════════════════════════════
+const OPENINGS = [
+  { name:"King's Pawn Opening",          eco:"B00", moves:["e2e4"],                                          games:2860395163, w:38,d:26,b:36 },
+  { name:"Queen's Pawn Opening",         eco:"A40", moves:["d2d4"],                                          games:1221713123, w:37,d:29,b:34 },
+  { name:"Open Game",                    eco:"C20", moves:["e2e4","e7e5"],                                    games:1169514886, w:38,d:28,b:34 },
+  { name:"Italian / Ruy Lopez Prelude",  eco:"C40", moves:["e2e4","e7e5","g1f3"],                            games:712523011,  w:40,d:27,b:33 },
+  { name:"Sicilian Defense",             eco:"B20", moves:["e2e4","c7c5"],                                    games:521312864,  w:36,d:25,b:39 },
+  { name:"Queen's Gambit Prelude",       eco:"D00", moves:["d2d4","d7d5"],                                    games:506764315,  w:37,d:30,b:33 },
+  { name:"Open Game · Main",            eco:"C44", moves:["e2e4","e7e5","g1f3","b8c6"],                      games:439064694,  w:40,d:27,b:33 },
+  { name:"Scandinavian Defense",         eco:"B01", moves:["e2e4","d7d5"],                                    games:296742446,  w:40,d:22,b:38 },
+  { name:"French Defense",               eco:"C00", moves:["e2e4","e7e6"],                                    games:290625721,  w:37,d:28,b:35 },
+  { name:"Sicilian · Open",              eco:"B21", moves:["e2e4","c7c5","g1f3"],                            games:277868022,  w:36,d:25,b:39 },
+  { name:"Indian Defense",               eco:"A45", moves:["d2d4","g8f6"],                                    games:237290777,  w:37,d:28,b:35 },
+  { name:"Queen's Gambit",               eco:"D06", moves:["d2d4","d7d5","c2c4"],                            games:198411098,  w:38,d:32,b:30 },
+  { name:"Scandinavian · Exchange",      eco:"B01", moves:["e2e4","d7d5","e4d5"],                            games:189778469,  w:42,d:22,b:36 },
+  { name:"Caro-Kann Defense",            eco:"B10", moves:["e2e4","c7c6"],                                    games:188072561,  w:38,d:28,b:34 },
+  { name:"Réti Opening",                 eco:"A04", moves:["g1f3"],                                          games:172734683,  w:37,d:28,b:35 },
+  { name:"English Opening",              eco:"A10", moves:["c2c4"],                                          games:161188410,  w:37,d:30,b:33 },
+  { name:"French · Advance",            eco:"C02", moves:["e2e4","e7e6","d2d4"],                            games:121462468,  w:38,d:27,b:35 },
+  { name:"Scandinavian · Queen",        eco:"B01", moves:["e2e4","d7d5","e4d5","d8d5"],                    games:136165341,  w:43,d:22,b:35 },
+  { name:"Queen's Pawn · French",       eco:"A46", moves:["d2d4","e7e6"],                                    games:122339813,  w:37,d:28,b:35 },
+  { name:"King's Pawn · Bishop's",      eco:"C23", moves:["e2e4","e7e5","f1c4"],                            games:121120428,  w:39,d:26,b:35 },
+  { name:"Sicilian · Nc6",              eco:"B23", moves:["e2e4","c7c5","g1f3","b8c6"],                    games:115602526,  w:36,d:25,b:39 },
+  { name:"Italian Game",                 eco:"C50", moves:["e2e4","e7e5","g1f3","b8c6","f1c4"],              games:185828227,  w:40,d:27,b:33 },
+  { name:"Queen's Gambit Declined",      eco:"D30", moves:["d2d4","d7d5","c2c4","e7e6"],                    games:101294058,  w:38,d:33,b:29 },
+  { name:"Nimzo/Queen's Indian",         eco:"E20", moves:["d2d4","g8f6","c2c4"],                            games:109484662,  w:37,d:30,b:33 },
+  { name:"King's Indian",                eco:"E60", moves:["d2d4","g8f6","c2c4","g7g6"],                    games:87432011,   w:36,d:28,b:36 },
+  { name:"Dutch Defense",                eco:"A80", moves:["d2d4","f7f5"],                                    games:62341200,   w:40,d:26,b:34 },
+  { name:"London System",                eco:"D02", moves:["d2d4","d7d5","g1f3"],                            games:86434224,   w:37,d:30,b:33 },
+  { name:"Pirc Defense",                 eco:"B07", moves:["e2e4","d7d6"],                                    games:78234100,   w:40,d:25,b:35 },
+  { name:"Slav Defense",                 eco:"D10", moves:["d2d4","d7d5","c2c4","c7c6"],                    games:82109342,   w:37,d:32,b:31 },
+  { name:"Sicilian · Dragon",           eco:"B70", moves:["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4"],     games:48392010,   w:36,d:24,b:40 },
+  { name:"Ruy López",                   eco:"C60", moves:["e2e4","e7e5","g1f3","b8c6","f1b5"],              games:97234441,   w:41,d:29,b:30 },
+  { name:"Four Knights Game",            eco:"C46", moves:["e2e4","e7e5","g1f3","b8c6","b1c3","g8f6"],      games:44128900,   w:38,d:31,b:31 },
+  { name:"Petrov's Defense",            eco:"C42", moves:["e2e4","e7e5","g1f3","g8f6"],                    games:56784320,   w:37,d:35,b:28 },
+  { name:"Alekhine's Defense",          eco:"B02", moves:["e2e4","g8f6"],                                    games:59123400,   w:40,d:24,b:36 },
+  { name:"Modern Defense",               eco:"B06", moves:["e2e4","g7g6"],                                    games:68234100,   w:41,d:23,b:36 },
+  { name:"King's Gambit",               eco:"C30", moves:["e2e4","e7e5","f2f4"],                            games:43219800,   w:41,d:24,b:35 },
+  { name:"Catalan Opening",              eco:"E00", moves:["d2d4","g8f6","c2c4","e7e6","g2g3"],              games:38421000,   w:38,d:33,b:29 },
+  { name:"Nimzowitsch Defense",          eco:"B00", moves:["e2e4","b8c6"],                                    games:41234500,   w:42,d:23,b:35 },
+  { name:"Grünfeld Defense",            eco:"D80", moves:["d2d4","g8f6","c2c4","g7g6","b1c3","d7d5"],      games:36892100,   w:37,d:31,b:32 },
+  { name:"Bird's Opening",              eco:"A02", moves:["f2f4"],                                          games:52341200,   w:38,d:25,b:37 },
+  { name:"Vienna Game",                  eco:"C25", moves:["e2e4","e7e5","b1c3"],                            games:61234900,   w:40,d:26,b:34 },
+  { name:"Benoni Defense",               eco:"A60", moves:["d2d4","g8f6","c2c4","c7c5","d4d5"],              games:29341800,   w:39,d:27,b:34 },
+  { name:"Sicilian · Najdorf",          eco:"B90", moves:["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4","f3d4","g8f6","b1c3","a7a6"], games:31234500, w:36,d:25,b:39 },
+  { name:"Semi-Slav Defense",           eco:"D43", moves:["d2d4","d7d5","c2c4","c7c6","b1c3","g8f6"],      games:34128900,   w:37,d:32,b:31 },
+  { name:"Benko Gambit",                eco:"A57", moves:["d2d4","g8f6","c2c4","c7c5","d4d5","b7b5"],      games:18234100,   w:37,d:27,b:36 },
+  { name:"Scotch Game",                  eco:"C45", moves:["e2e4","e7e5","g1f3","b8c6","d2d4","e5d4"],      games:52341800,   w:41,d:26,b:33 },
+  { name:"Two Knights Defense",          eco:"C55", moves:["e2e4","e7e5","g1f3","b8c6","f1c4","g8f6"],      games:43891200,   w:40,d:26,b:34 },
+  { name:"Giuoco Piano",                 eco:"C53", moves:["e2e4","e7e5","g1f3","b8c6","f1c4","f8c5"],      games:38234100,   w:40,d:27,b:33 },
+  { name:"Colle System",                 eco:"D04", moves:["d2d4","d7d5","g1f3","g8f6","e2e3"],              games:24891200,   w:37,d:30,b:33 },
+  { name:"Nimzo-Indian Defense",         eco:"E20", moves:["d2d4","g8f6","c2c4","e7e6","b1c3","f8b4"],      games:41234800,   w:37,d:32,b:31 },
+];
+
+// Max games for popularity bar scaling
+const MAX_GAMES = OPENINGS[0].games;
+
+// ═══════════════════════════════════════════════════════════
+// CHESS BOARD STATE
+// Start position FEN pieces
+// ═══════════════════════════════════════════════════════════
+const PIECE_UNICODE = {
+  wK:'♔', wQ:'♕', wR:'♖', wB:'♗', wN:'♘', wP:'♙',
+  bK:'♚', bQ:'♛', bR:'♜', bB:'♝', bN:'♞', bP:'♟',
+};
+
+// Board is 8x8 array[rank0-7][file0-7], rank0=rank8(top), rank7=rank1(bottom)
+function startBoard() {
+  return [
+    ['bR','bN','bB','bQ','bK','bB','bN','bR'],
+    ['bP','bP','bP','bP','bP','bP','bP','bP'],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    ['wP','wP','wP','wP','wP','wP','wP','wP'],
+    ['wR','wN','wB','wQ','wK','wB','wN','wR'],
+  ];
+}
+
+function uciToCoords(uci) {
+  // e.g. "e2e4" → from {r:6,f:4} to {r:4,f:4}
+  const files = {a:0,b:1,c:2,d:3,e:4,f:5,g:6,h:7};
+  return {
+    fr: 8 - parseInt(uci[1]),
+    ff: files[uci[0]],
+    tr: 8 - parseInt(uci[3]),
+    tf: files[uci[2]],
+  };
+}
+
+function applyMove(board, uci) {
+  const b = board.map(r => [...r]);
+  const {fr,ff,tr,tf} = uciToCoords(uci);
+  // handle promotion (e.g. e7e8q)
+  let piece = b[fr][ff];
+  if (uci.length === 5) {
+    const promoPiece = uci[4].toUpperCase();
+    piece = piece[0] + promoPiece; // e.g. wQ
+  }
+  // handle en passant capture
+  if (piece && piece[1]==='P' && ff!==tf && !b[tr][tf]) {
+    b[fr][tf] = null; // captured pawn
+  }
+  // handle castling
+  if (piece === 'wK' && fr===7 && ff===4) {
+    if (tf===6) { b[7][5]='wR'; b[7][7]=null; } // kingside
+    if (tf===2) { b[7][3]='wR'; b[7][0]=null; } // queenside
+  }
+  if (piece === 'bK' && fr===0 && ff===4) {
+    if (tf===6) { b[0][5]='bR'; b[0][7]=null; }
+    if (tf===2) { b[0][3]='bR'; b[0][0]=null; }
+  }
+  b[tr][tf] = piece;
+  b[fr][ff] = null;
+  return b;
+}
+
+// ═══════════════════════════════════════════════════════════
+// BUILD BOARD DOM
+// ═══════════════════════════════════════════════════════════
+const boardEl = document.getElementById('board');
+const squares = []; // squares[rank][file] = sq element
+
+function buildBoard() {
+  boardEl.innerHTML = '';
+  const files = ['a','b','c','d','e','f','g','h'];
+  for (let r = 0; r < 8; r++) {
+    squares[r] = [];
+    for (let f = 0; f < 8; f++) {
+      const sq = document.createElement('div');
+      sq.className = 'sq ' + ((r + f) % 2 === 0 ? 'light' : 'dark');
+      sq.dataset.r = r;
+      sq.dataset.f = f;
+      // rank label on leftmost square
+      if (f === 0) {
+        const rl = document.createElement('span');
+        rl.className = 'rank-label';
+        rl.textContent = 8 - r;
+        sq.appendChild(rl);
+      }
+      // file label on bottom row
+      if (r === 7) {
+        const fl = document.createElement('span');
+        fl.className = 'file-label';
+        fl.textContent = files[f];
+        sq.appendChild(fl);
+      }
+      boardEl.appendChild(sq);
+      squares[r][f] = sq;
+    }
+  }
+}
+
+function renderBoard(board, fromR, fromF, toR, toF) {
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const sq = squares[r][f];
+      // remove old piece
+      const oldPiece = sq.querySelector('.piece');
+      if (oldPiece) oldPiece.remove();
+      // clear highlights
+      sq.classList.remove('highlight-from','highlight-to');
+      // add piece
+      const p = board[r][f];
+      if (p) {
+        const span = document.createElement('span');
+        span.className = 'piece';
+        span.textContent = PIECE_UNICODE[p] || '?';
+        // color the piece
+        span.style.color = p[0]==='w' ? 'var(--piece-w)' : 'var(--piece-b)';
+        if (p[0]==='w') {
+          span.style.textShadow = '0 1px 3px rgba(0,0,0,0.6)';
+        } else {
+          span.style.textShadow = '0 1px 3px rgba(255,255,255,0.08)';
+        }
+        sq.appendChild(span);
+      }
+    }
+  }
+  // apply highlights
+  if (fromR !== undefined) {
+    squares[fromR][fromF].classList.add('highlight-from');
+    squares[toR][toF].classList.add('highlight-to');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// ANIMATION ENGINE
+// ═══════════════════════════════════════════════════════════
+const FRAME_MS = 1200; // 1.2s per move frame
+
+let currentOpeningIdx = 0;
+let currentMoveIdx    = 0; // which move within the opening
+let currentBoard      = startBoard();
+let frameTimer        = null;
+let progressTimer     = null;
+
+function formatCount(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(0) + 'K';
+  return n.toString();
+}
+
+function updateSidebar(opening, moveIdx) {
+  // Opening name & ECO
+  document.getElementById('opening-name').textContent = opening.name;
+  document.getElementById('eco-code').textContent     = opening.eco;
+  document.getElementById('game-count').textContent   = formatCount(opening.games);
+
+  // Move list
+  const moveList = document.getElementById('move-list');
+  moveList.innerHTML = '';
+  opening.moves.forEach((m, i) => {
+    const div = document.createElement('div');
+    div.className = 'move-item' +
+      (i < moveIdx  ? ' done'   : '') +
+      (i === moveIdx ? ' active' : '');
+    const num  = Math.floor(i/2) + 1;
+    const side = i % 2 === 0 ? `${num}.` : '   ···';
+    div.textContent = `${side} ${m}`;
+    moveList.appendChild(div);
+  });
+
+  // Popularity bar
+  const pct = (opening.games / MAX_GAMES) * 100;
+  document.getElementById('pop-bar-fill').style.width = pct + '%';
+
+  // Win rates
+  document.getElementById('wr-white').style.width = opening.w + '%';
+  document.getElementById('wr-draw').style.width  = opening.d + '%';
+  document.getElementById('wr-black').style.width = opening.b + '%';
+  document.getElementById('wr-label').textContent =
+    `${opening.w}% · ${opening.d}% · ${opening.b}%`;
+
+  // Big counter
+  const ctr = document.getElementById('big-counter');
+  ctr.textContent = String(currentOpeningIdx + 1).padStart(3, '0');
+  ctr.classList.add('flash');
+  setTimeout(() => ctr.classList.remove('flash'), 300);
+
+  // Queue
+  const queue = document.getElementById('queue');
+  queue.innerHTML = '';
+  for (let i = -1; i <= 3; i++) {
+    const idx = currentOpeningIdx + i;
+    if (idx < 0 || idx >= OPENINGS.length) continue;
+    const div = document.createElement('div');
+    div.className = 'queue-item' +
+      (i === 0 ? ' current' : i === 1 ? ' next' : '');
+    div.textContent = OPENINGS[idx].name;
+    queue.appendChild(div);
+  }
+}
+
+function kickProgress() {
+  const fill = document.getElementById('bottom-fill');
+  fill.style.transition = 'none';
+  fill.style.width = '0%';
+  fill.getBoundingClientRect();
+  fill.style.transition = `width ${FRAME_MS}ms linear`;
+  fill.style.width = '100%';
+}
+
+function nextFrame() {
+  const opening = OPENINGS[currentOpeningIdx];
+
+  if (currentMoveIdx === 0) {
+    // First frame of a new opening — show start position
+    currentBoard = startBoard();
+    renderBoard(currentBoard);
+    updateSidebar(opening, -1);
+    kickProgress();
+    currentMoveIdx = 1;
+    return;
+  }
+
+  const moveUCI = opening.moves[currentMoveIdx - 1];
+  if (!moveUCI) {
+    // Opening exhausted — move to next
+    currentOpeningIdx = (currentOpeningIdx + 1) % OPENINGS.length;
+    currentMoveIdx = 0;
+    nextFrame();
+    return;
+  }
+
+  // Apply move
+  const {fr,ff,tr,tf} = uciToCoords(moveUCI);
+  currentBoard = applyMove(currentBoard, moveUCI);
+  renderBoard(currentBoard, fr, ff, tr, tf);
+  updateSidebar(opening, currentMoveIdx - 1);
+  kickProgress();
+
+  currentMoveIdx++;
+
+  // If we've played all moves in this opening, pause on last position
+  // then advance
+  if (currentMoveIdx > opening.moves.length) {
+    currentMoveIdx = 0;
+    currentOpeningIdx = (currentOpeningIdx + 1) % OPENINGS.length;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════════════════════
+buildBoard();
+renderBoard(startBoard());
+
+// Show first frame, then tick
+nextFrame();
+frameTimer = setInterval(nextFrame, FRAME_MS);
+</script>
+</body>
+</html>

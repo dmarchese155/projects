@@ -1,0 +1,4 @@
+[ZoneTransfer]
+ZoneId=3
+ReferrerUrl=https://claude.ai/chat/2fbdbc43-df78-4e49-8603-01f0b525a9c6
+HostUrl=https://claude.ai/api/organizations/d0abfa17-9922-400f-b2ac-afaea01f5014/conversations/2fbdbc43-df78-4e49-8603-01f0b525a9c6/wiggle/download-file?path=%2Fmnt%2Fuser-data%2Foutputs%2Fparse_lichess_openings.py
