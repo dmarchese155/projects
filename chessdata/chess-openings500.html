@@ -89,17 +89,23 @@ html, body {
   width: var(--cell-px);
   height: var(--cell-px);
   display: block;
-  /* pixelated keeps chess pieces sharp when canvas is upscaled */
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
+  /* bilinear scaling — eliminates pixel-boundary jitter during pan */
+  image-rendering: auto;
 }
 .cell .gc-label {
-  font-size: 9px;
+  font-size: clamp(7px, 0.55vw, 10px);
   color: var(--fg);
-  letter-spacing: 0.06em;
-  line-height: 1;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: var(--cell-px);
+  text-align: center;
 }
+.cell .gc-label .lbl-rank  { color: #444; }
+.cell .gc-label .lbl-count { color: #666; }
+.cell .gc-label .lbl-name  { color: #4a4a4a; font-style: italic; }
 .cell.empty canvas  { opacity: 0.06; }
 .cell.empty .gc-label { visibility: hidden; }
 
@@ -152,7 +158,7 @@ html, body {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ▼▼▼  SET YOUR JSON FILENAME HERE  ▼▼▼
-const JSON_FILE = 'lichess_db_standard_rated_2013-08_openings.json';
+const JSON_FILE = 'lichess_db_standard_rated_2026-04_openings.json';
 // ▲▲▲  File must be in the same folder as this HTML file  ▲▲▲
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -169,14 +175,15 @@ const CELL_PX     = 160;    // display size of each board in pixels
 // ▲▲▲  Grid will be 25 × CELL_PX wide. At 160px ≈ 4060px total.    ▲▲▲
 // ─────────────────────────────────────────────────────────────────────────
 
-// Internal canvas resolution — higher = sharper pieces, slightly more GPU.
-// 192 gives crisp pieces at 160px display size (1.2× oversample).
-const CANVAS_RES  = 192;
-const SQ          = CANVAS_RES / 8;
+// ─────────────────────────────────────────────────────────────────────────
+// ▼▼▼  DRIFT SPEED — camera pan speed in pixels per second  ▼▼▼
+const DRIFT_SPEED = 30;     // lower = slower drift, higher = faster
+// ─────────────────────────────────────────────────────────────────────────
 
-// Camera drift speed (px per second). Bounces off edges like a DVD logo.
-// Increase for faster panning, decrease for slower.
-const DRIFT_SPEED = 35;
+// Internal canvas resolution. 2× oversample relative to CELL_PX keeps
+// pieces sharp under bilinear scaling during the pan.
+const CANVAS_RES  = CELL_PX * 2;
+const SQ          = CANVAS_RES / 8;
 
 // ── COLOURS ─────────────────────────────────────────────────────────────────
 const C_LIGHT   = '#c9b99a';
@@ -295,7 +302,6 @@ let boards   = [];
 let ctxs     = [];
 let stepIdx  = 0;
 let maxSteps = 0;
-let loopTimer = null;
 
 function initBoards(data) {
   openings = [...data].sort((a,b)=>a.rank-b.rank).slice(0, MAX_BOARDS);
@@ -327,7 +333,26 @@ function buildGrid() {
     const ctx = canvas.getContext('2d', { alpha: false });
     ctxs.push(ctx);
 
-    label.textContent = i < openings.length ? fmt(openings[i].game_count) : '';
+    if (i < openings.length) {
+      const o    = openings[i];
+      const rank = document.createElement('span');
+      const cnt  = document.createElement('span');
+      const name = document.createElement('span');
+
+      rank.className = 'lbl-rank';
+      cnt.className  = 'lbl-count';
+      name.className = 'lbl-name';
+
+      rank.textContent = '#' + o.rank;
+      cnt.textContent  = fmt(o.game_count);
+      name.textContent = o.opening_name || '—';
+
+      label.appendChild(rank);
+      label.appendChild(document.createTextNode(' · '));
+      label.appendChild(cnt);
+      label.appendChild(document.createElement('br'));
+      label.appendChild(name);
+    }
 
     cell.appendChild(canvas);
     cell.appendChild(label);
@@ -369,74 +394,82 @@ function kickProgress() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// DVD DRIFT CAMERA
-// Uses translate3d so the browser composites on the GPU — no pixel snapping,
-// no layout recalculation, perfectly smooth 60fps pan.
-// Velocity bounces off edges. driftX/driftY are floating-point throughout.
+// UNIFIED ANIMATION LOOP
+// One single requestAnimationFrame loop drives BOTH the camera drift AND
+// the chess step timer. This guarantees the camera never gets starved —
+// there is no separate setInterval competing for the thread.
 // ═══════════════════════════════════════════════════════════════════════════
-let driftX    = 0;
-let driftY    = 0;
+
+// ── Camera state ──
+let camX      = 0;
+let camY      = 0;
+let tgtX      = 0;
+let tgtY      = 0;
 let velX      = DRIFT_SPEED;
-let velY      = DRIFT_SPEED * 0.61803; // golden ratio offset → non-repeating path
-let lastRAF   = null;
-let prevT     = null;
+let velY      = DRIFT_SPEED * 0.61803;
 let maxDriftX = 0;
 let maxDriftY = 0;
+let camEl     = null;
+const LERP    = 0.1;  // smoothing per-frame at 60fps — higher = snappier
 
-function startDrift() {
+// ── Chess step state ──
+let stepAccum = 0;    // accumulated ms since last chess step
+
+// ── Loop handle ──
+let rafHandle = null;
+let prevT     = null;
+
+function startMainLoop() {
+  // Grab DOM refs now — guaranteed to exist
+  camEl = document.getElementById('camera');
+
   const grid = document.getElementById('grid');
-  const vw   = window.innerWidth;
-  const vh   = window.innerHeight;
+  maxDriftX = Math.max(0, grid.scrollWidth  - window.innerWidth);
+  maxDriftY = Math.max(0, grid.scrollHeight - window.innerHeight);
 
-  // getBoundingClientRect is accurate after the DOM has painted
-  const gw = grid.scrollWidth;
-  const gh = grid.scrollHeight;
-
-  maxDriftX = Math.max(0, gw - vw);
-  maxDriftY = Math.max(0, gh - vh);
-
-  // Start near centre
-  driftX = maxDriftX / 2;
-  driftY = maxDriftY / 3;
-
-  // Random initial direction
+  // Start camera near centre
+  camX = tgtX = maxDriftX / 2;
+  camY = tgtY = maxDriftY / 3;
   if (Math.random() > 0.5) velX *= -1;
   if (Math.random() > 0.5) velY *= -1;
 
-  prevT  = performance.now();
-  lastRAF = requestAnimationFrame(driftTick);
-}
-
-function driftTick(t) {
-  // Delta time in seconds, capped so a tab-blur pause doesn't cause a jump
-  const dt = Math.min((t - prevT) * 0.001, 0.05);
-  prevT = t;
-
-  driftX += velX * dt;
-  driftY += velY * dt;
-
-  // Elastic bounce off each edge
-  if (driftX <= 0)         { driftX = 0;         velX =  Math.abs(velX); }
-  if (driftX >= maxDriftX) { driftX = maxDriftX;  velX = -Math.abs(velX); }
-  if (driftY <= 0)         { driftY = 0;          velY =  Math.abs(velY); }
-  if (driftY >= maxDriftY) { driftY = maxDriftY;  velY = -Math.abs(velY); }
-
-  // translate3d → GPU layer, no integer rounding, sub-pixel smooth
-  document.getElementById('camera').style.transform =
-    `translate3d(${-driftX}px, ${-driftY}px, 0)`;
-
-  lastRAF = requestAnimationFrame(driftTick);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CHESS ANIMATION LOOP
-// ═══════════════════════════════════════════════════════════════════════════
-function startLoop() {
-  stepIdx = 0;
+  // Reset chess state
+  stepIdx   = 0;
+  stepAccum = 0;
   renderStep(0);
   kickProgress();
 
-  loopTimer = setInterval(() => {
+  prevT     = performance.now();
+  rafHandle = requestAnimationFrame(mainTick);
+}
+
+function mainTick(t) {
+  // Always reschedule FIRST — nothing can kill the loop
+  rafHandle = requestAnimationFrame(mainTick);
+
+  const dt  = Math.min((t - prevT) * 0.001, 0.1); // seconds, capped
+  prevT = t;
+
+  // ── 1. Camera drift (runs every frame — truly continuous) ──
+  tgtX += velX * dt;
+  tgtY += velY * dt;
+
+  if (tgtX <= 0)         { tgtX = 0;         velX =  Math.abs(velX); }
+  if (tgtX >= maxDriftX) { tgtX = maxDriftX;  velX = -Math.abs(velX); }
+  if (tgtY <= 0)         { tgtY = 0;          velY =  Math.abs(velY); }
+  if (tgtY >= maxDriftY) { tgtY = maxDriftY;  velY = -Math.abs(velY); }
+
+  // Frame-rate-independent lerp
+  const alpha = 1 - Math.pow(1 - LERP, dt * 60);
+  camX += (tgtX - camX) * alpha;
+  camY += (tgtY - camY) * alpha;
+
+  camEl.style.transform = `translate3d(${-camX}px,${-camY}px,0)`;
+
+  // ── 2. Chess step timer (accumulator — fires every STEP_MS ms) ──
+  stepAccum += dt * 1000;
+  if (stepAccum >= STEP_MS) {
+    stepAccum -= STEP_MS;
     stepIdx++;
     if (stepIdx > maxSteps) {
       stepIdx = 0;
@@ -445,7 +478,7 @@ function startLoop() {
       renderStep(stepIdx);
     }
     kickProgress();
-  }, STEP_MS);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -453,8 +486,7 @@ function startLoop() {
 // ═══════════════════════════════════════════════════════════════════════════
 function launch(data) {
   document.getElementById('loading-screen').style.display = 'none';
-  if (loopTimer) { clearInterval(loopTimer); loopTimer = null; }
-  if (lastRAF)   { cancelAnimationFrame(lastRAF); lastRAF = null; }
+  if (rafHandle) { cancelAnimationFrame(rafHandle); rafHandle = null; }
 
   // Sync CSS variable with JS constant — one source of truth
   document.documentElement.style.setProperty('--cell-px', CELL_PX + 'px');
@@ -462,67 +494,64 @@ function launch(data) {
   initBoards(data);
   buildGrid();
 
-  // Let the DOM paint one frame so grid dimensions are available
-  requestAnimationFrame(() => {
-    startDrift();
-    startLoop();
-  });
+  // Wait two rAF frames so grid layout is fully computed before measuring
+  requestAnimationFrame(() => requestAnimationFrame(startMainLoop));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BUILT-IN DEMO DATA (50 openings — used when JSON_FILE can't be fetched)
 // ═══════════════════════════════════════════════════════════════════════════
 const DEMO_OPENINGS = [
-  {rank:1,  moves_uci:["e2e4"],                                                                   game_count:2860395163},
-  {rank:2,  moves_uci:["d2d4"],                                                                   game_count:1221713123},
-  {rank:3,  moves_uci:["e2e4","e7e5"],                                                            game_count:1169514886},
-  {rank:4,  moves_uci:["e2e4","e7e5","g1f3"],                                                     game_count:712523011},
-  {rank:5,  moves_uci:["e2e4","c7c5"],                                                            game_count:521312864},
-  {rank:6,  moves_uci:["d2d4","d7d5"],                                                            game_count:506764315},
-  {rank:7,  moves_uci:["e2e4","e7e5","g1f3","b8c6"],                                             game_count:439064694},
-  {rank:8,  moves_uci:["e2e4","d7d5"],                                                            game_count:296742446},
-  {rank:9,  moves_uci:["e2e4","e7e6"],                                                            game_count:290625721},
-  {rank:10, moves_uci:["e2e4","c7c5","g1f3"],                                                     game_count:277868022},
-  {rank:11, moves_uci:["d2d4","g8f6"],                                                            game_count:237290777},
-  {rank:12, moves_uci:["d2d4","d7d5","c2c4"],                                                     game_count:198411098},
-  {rank:13, moves_uci:["e2e4","d7d5","e4d5"],                                                     game_count:189778469},
-  {rank:14, moves_uci:["e2e4","c7c6"],                                                            game_count:188072561},
-  {rank:15, moves_uci:["g1f3"],                                                                   game_count:172734683},
-  {rank:16, moves_uci:["c2c4"],                                                                   game_count:161188410},
-  {rank:17, moves_uci:["e2e4","e7e6","d2d4"],                                                     game_count:121462468},
-  {rank:18, moves_uci:["e2e4","d7d5","e4d5","d8d5"],                                             game_count:136165341},
-  {rank:19, moves_uci:["d2d4","e7e6"],                                                            game_count:122339813},
-  {rank:20, moves_uci:["e2e4","e7e5","f1c4"],                                                     game_count:121120428},
-  {rank:21, moves_uci:["e2e4","c7c5","g1f3","b8c6"],                                             game_count:115602526},
-  {rank:22, moves_uci:["e2e4","e7e5","g1f3","b8c6","f1c4"],                                      game_count:185828227},
-  {rank:23, moves_uci:["d2d4","d7d5","c2c4","e7e6"],                                             game_count:101294058},
-  {rank:24, moves_uci:["d2d4","g8f6","c2c4"],                                                     game_count:109484662},
-  {rank:25, moves_uci:["d2d4","g8f6","c2c4","g7g6"],                                             game_count:87432011},
-  {rank:26, moves_uci:["d2d4","f7f5"],                                                            game_count:62341200},
-  {rank:27, moves_uci:["d2d4","d7d5","g1f3"],                                                     game_count:86434224},
-  {rank:28, moves_uci:["e2e4","d7d6"],                                                            game_count:78234100},
-  {rank:29, moves_uci:["d2d4","d7d5","c2c4","c7c6"],                                             game_count:82109342},
-  {rank:30, moves_uci:["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4"],                               game_count:48392010},
-  {rank:31, moves_uci:["e2e4","e7e5","g1f3","b8c6","f1b5"],                                      game_count:97234441},
-  {rank:32, moves_uci:["e2e4","e7e5","g1f3","b8c6","b1c3","g8f6"],                               game_count:44128900},
-  {rank:33, moves_uci:["e2e4","e7e5","g1f3","g8f6"],                                             game_count:56784320},
-  {rank:34, moves_uci:["e2e4","g8f6"],                                                            game_count:59123400},
-  {rank:35, moves_uci:["e2e4","g7g6"],                                                            game_count:68234100},
-  {rank:36, moves_uci:["e2e4","e7e5","f2f4"],                                                     game_count:43219800},
-  {rank:37, moves_uci:["d2d4","g8f6","c2c4","e7e6","g2g3"],                                      game_count:38421000},
-  {rank:38, moves_uci:["e2e4","b8c6"],                                                            game_count:41234500},
-  {rank:39, moves_uci:["d2d4","g8f6","c2c4","g7g6","b1c3","d7d5"],                               game_count:36892100},
-  {rank:40, moves_uci:["f2f4"],                                                                   game_count:52341200},
-  {rank:41, moves_uci:["e2e4","e7e5","b1c3"],                                                     game_count:61234900},
-  {rank:42, moves_uci:["d2d4","g8f6","c2c4","c7c5","d4d5"],                                      game_count:29341800},
-  {rank:43, moves_uci:["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4","f3d4","g8f6","b1c3","a7a6"],   game_count:31234500},
-  {rank:44, moves_uci:["d2d4","d7d5","c2c4","c7c6","b1c3","g8f6"],                               game_count:34128900},
-  {rank:45, moves_uci:["d2d4","g8f6","c2c4","c7c5","d4d5","b7b5"],                               game_count:18234100},
-  {rank:46, moves_uci:["e2e4","e7e5","g1f3","b8c6","d2d4","e5d4"],                               game_count:52341800},
-  {rank:47, moves_uci:["e2e4","e7e5","g1f3","b8c6","f1c4","g8f6"],                               game_count:43891200},
-  {rank:48, moves_uci:["e2e4","e7e5","g1f3","b8c6","f1c4","f8c5"],                               game_count:38234100},
-  {rank:49, moves_uci:["d2d4","d7d5","g1f3","g8f6","e2e3"],                                      game_count:24891200},
-  {rank:50, moves_uci:["d2d4","g8f6","c2c4","e7e6","b1c3","f8b4"],                               game_count:41234800},
+  {rank:1,  moves_uci:["e2e4"],                                                                   game_count:2860395163, opening_name:"King's Pawn Opening"},
+  {rank:2,  moves_uci:["d2d4"],                                                                   game_count:1221713123, opening_name:"Queen's Pawn Opening"},
+  {rank:3,  moves_uci:["e2e4","e7e5"],                                                            game_count:1169514886, opening_name:"Open Game"},
+  {rank:4,  moves_uci:["e2e4","e7e5","g1f3"],                                                     game_count:712523011,  opening_name:"King's Knight Opening"},
+  {rank:5,  moves_uci:["e2e4","c7c5"],                                                            game_count:521312864,  opening_name:"Sicilian Defense"},
+  {rank:6,  moves_uci:["d2d4","d7d5"],                                                            game_count:506764315,  opening_name:"Queen's Pawn Game"},
+  {rank:7,  moves_uci:["e2e4","e7e5","g1f3","b8c6"],                                             game_count:439064694,  opening_name:"Open Game"},
+  {rank:8,  moves_uci:["e2e4","d7d5"],                                                            game_count:296742446,  opening_name:"Scandinavian Defense"},
+  {rank:9,  moves_uci:["e2e4","e7e6"],                                                            game_count:290625721,  opening_name:"French Defense"},
+  {rank:10, moves_uci:["e2e4","c7c5","g1f3"],                                                     game_count:277868022,  opening_name:"Sicilian: Open"},
+  {rank:11, moves_uci:["d2d4","g8f6"],                                                            game_count:237290777,  opening_name:"Indian Defense"},
+  {rank:12, moves_uci:["d2d4","d7d5","c2c4"],                                                     game_count:198411098,  opening_name:"Queen's Gambit"},
+  {rank:13, moves_uci:["e2e4","d7d5","e4d5"],                                                     game_count:189778469,  opening_name:"Scandinavian: Exchange"},
+  {rank:14, moves_uci:["e2e4","c7c6"],                                                            game_count:188072561,  opening_name:"Caro-Kann Defense"},
+  {rank:15, moves_uci:["g1f3"],                                                                   game_count:172734683,  opening_name:"Réti Opening"},
+  {rank:16, moves_uci:["c2c4"],                                                                   game_count:161188410,  opening_name:"English Opening"},
+  {rank:17, moves_uci:["e2e4","e7e6","d2d4"],                                                     game_count:121462468,  opening_name:"French: Advance"},
+  {rank:18, moves_uci:["e2e4","d7d5","e4d5","d8d5"],                                             game_count:136165341,  opening_name:"Scandinavian: Main Line"},
+  {rank:19, moves_uci:["d2d4","e7e6"],                                                            game_count:122339813,  opening_name:"Queen's Pawn: French"},
+  {rank:20, moves_uci:["e2e4","e7e5","f1c4"],                                                     game_count:121120428,  opening_name:"Bishop's Opening"},
+  {rank:21, moves_uci:["e2e4","c7c5","g1f3","b8c6"],                                             game_count:115602526,  opening_name:"Sicilian: Nc6"},
+  {rank:22, moves_uci:["e2e4","e7e5","g1f3","b8c6","f1c4"],                                      game_count:185828227,  opening_name:"Italian Game"},
+  {rank:23, moves_uci:["d2d4","d7d5","c2c4","e7e6"],                                             game_count:101294058,  opening_name:"Queen's Gambit Declined"},
+  {rank:24, moves_uci:["d2d4","g8f6","c2c4"],                                                     game_count:109484662,  opening_name:"Indian: c4"},
+  {rank:25, moves_uci:["d2d4","g8f6","c2c4","g7g6"],                                             game_count:87432011,   opening_name:"King's Indian Defense"},
+  {rank:26, moves_uci:["d2d4","f7f5"],                                                            game_count:62341200,   opening_name:"Dutch Defense"},
+  {rank:27, moves_uci:["d2d4","d7d5","g1f3"],                                                     game_count:86434224,   opening_name:"London System"},
+  {rank:28, moves_uci:["e2e4","d7d6"],                                                            game_count:78234100,   opening_name:"Pirc Defense"},
+  {rank:29, moves_uci:["d2d4","d7d5","c2c4","c7c6"],                                             game_count:82109342,   opening_name:"Slav Defense"},
+  {rank:30, moves_uci:["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4"],                               game_count:48392010,   opening_name:"Sicilian: Dragon"},
+  {rank:31, moves_uci:["e2e4","e7e5","g1f3","b8c6","f1b5"],                                      game_count:97234441,   opening_name:"Ruy López"},
+  {rank:32, moves_uci:["e2e4","e7e5","g1f3","b8c6","b1c3","g8f6"],                               game_count:44128900,   opening_name:"Four Knights Game"},
+  {rank:33, moves_uci:["e2e4","e7e5","g1f3","g8f6"],                                             game_count:56784320,   opening_name:"Petrov's Defense"},
+  {rank:34, moves_uci:["e2e4","g8f6"],                                                            game_count:59123400,   opening_name:"Alekhine's Defense"},
+  {rank:35, moves_uci:["e2e4","g7g6"],                                                            game_count:68234100,   opening_name:"Modern Defense"},
+  {rank:36, moves_uci:["e2e4","e7e5","f2f4"],                                                     game_count:43219800,   opening_name:"King's Gambit"},
+  {rank:37, moves_uci:["d2d4","g8f6","c2c4","e7e6","g2g3"],                                      game_count:38421000,   opening_name:"Catalan Opening"},
+  {rank:38, moves_uci:["e2e4","b8c6"],                                                            game_count:41234500,   opening_name:"Nimzowitsch Defense"},
+  {rank:39, moves_uci:["d2d4","g8f6","c2c4","g7g6","b1c3","d7d5"],                               game_count:36892100,   opening_name:"Grünfeld Defense"},
+  {rank:40, moves_uci:["f2f4"],                                                                   game_count:52341200,   opening_name:"Bird's Opening"},
+  {rank:41, moves_uci:["e2e4","e7e5","b1c3"],                                                     game_count:61234900,   opening_name:"Vienna Game"},
+  {rank:42, moves_uci:["d2d4","g8f6","c2c4","c7c5","d4d5"],                                      game_count:29341800,   opening_name:"Benoni Defense"},
+  {rank:43, moves_uci:["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4","f3d4","g8f6","b1c3","a7a6"],   game_count:31234500,   opening_name:"Sicilian: Najdorf"},
+  {rank:44, moves_uci:["d2d4","d7d5","c2c4","c7c6","b1c3","g8f6"],                               game_count:34128900,   opening_name:"Semi-Slav Defense"},
+  {rank:45, moves_uci:["d2d4","g8f6","c2c4","c7c5","d4d5","b7b5"],                               game_count:18234100,   opening_name:"Benko Gambit"},
+  {rank:46, moves_uci:["e2e4","e7e5","g1f3","b8c6","d2d4","e5d4"],                               game_count:52341800,   opening_name:"Scotch Game"},
+  {rank:47, moves_uci:["e2e4","e7e5","g1f3","b8c6","f1c4","g8f6"],                               game_count:43891200,   opening_name:"Two Knights Defense"},
+  {rank:48, moves_uci:["e2e4","e7e5","g1f3","b8c6","f1c4","f8c5"],                               game_count:38234100,   opening_name:"Giuoco Piano"},
+  {rank:49, moves_uci:["d2d4","d7d5","g1f3","g8f6","e2e3"],                                      game_count:24891200,   opening_name:"Colle System"},
+  {rank:50, moves_uci:["d2d4","g8f6","c2c4","e7e6","b1c3","f8b4"],                               game_count:41234800,   opening_name:"Nimzo-Indian Defense"},
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
