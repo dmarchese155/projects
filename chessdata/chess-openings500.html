@@ -245,41 +245,104 @@ function applyUCI(b, uci) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CANVAS RENDERING
+// OPTIMISATION 1 — PRE-RENDERED PIECE SPRITES
+// Draw each of the 12 piece glyphs once at startup onto small offscreen
+// canvases. Every board draw then uses drawImage() instead of fillText(),
+// eliminating font layout, glyph rasterisation, and shadow blur per frame.
+// drawImage is 5-10× faster than fillText for repeated use.
 // ═══════════════════════════════════════════════════════════════════════════
+const SPRITE = {};   // key: 'wK', 'bP', etc. → ImageBitmap (set in buildSprites)
+
+async function buildSprites() {
+  const size = SQ;
+  const keys = Object.keys(GLYPHS);
+
+  for (const key of keys) {
+    const oc  = document.createElement('canvas');
+    oc.width  = size;
+    oc.height = size;
+    const cx  = oc.getContext('2d');
+    const isW = key[0] === 'w';
+
+    cx.font         = PIECE_FONT;
+    cx.textAlign    = 'center';
+    cx.textBaseline = 'middle';
+
+    // Outline pass (no blur — just a 1px offset for contrast)
+    cx.fillStyle = isW ? 'rgba(0,0,0,0.55)' : 'rgba(255,255,255,0.12)';
+    cx.fillText(GLYPHS[key], size/2 + 1, size/2 + 2);
+
+    // Main fill
+    cx.fillStyle = isW ? C_W : C_B;
+    cx.fillText(GLYPHS[key], size/2, size/2 + 1);
+
+    // Convert to ImageBitmap — GPU-resident, fastest possible drawImage source
+    SPRITE[key] = await createImageBitmap(oc);
+  }
+}
+
+// ── Pre-baked empty board ImageBitmap (drawn once, reused for all resets) ──
+let EMPTY_BOARD_SPRITE = null;
+let START_BOARD_SPRITE = null;
+
+async function buildBoardSprites() {
+  // Empty board (for unfilled cells)
+  const ec  = document.createElement('canvas');
+  ec.width  = CANVAS_RES; ec.height = CANVAS_RES;
+  const ecx = ec.getContext('2d');
+  for (let r=0;r<8;r++) for (let f=0;f<8;f++) {
+    ecx.fillStyle = (r+f)%2===0 ? '#181818' : '#141414';
+    ecx.fillRect(f*SQ,r*SQ,SQ,SQ);
+  }
+  EMPTY_BOARD_SPRITE = await createImageBitmap(ec);
+
+  // Starting position board (drawn once, stamped on every reset)
+  const sc  = document.createElement('canvas');
+  sc.width  = CANVAS_RES; sc.height = CANVAS_RES;
+  const scx = sc.getContext('2d');
+  drawBoardToCtx(scx, startPos(), -1, -1, -1, -1);
+  START_BOARD_SPRITE = await createImageBitmap(sc);
+}
+
+// ── Core draw function — uses sprites, no shadow, batches by colour ──
+function drawBoardToCtx(ctx, board, fromR, fromF, toR, toF) {
+  // Pass 1: squares (batch light then dark to minimise fillStyle changes)
+  ctx.fillStyle = C_LIGHT;
+  for (let r=0;r<8;r++) for (let f=0;f<8;f++)
+    if ((r+f)%2===0) ctx.fillRect(f*SQ,r*SQ,SQ,SQ);
+  ctx.fillStyle = C_DARK;
+  for (let r=0;r<8;r++) for (let f=0;f<8;f++)
+    if ((r+f)%2!==0) ctx.fillRect(f*SQ,r*SQ,SQ,SQ);
+
+  // Pass 2: highlights
+  if (fromR >= 0) {
+    ctx.fillStyle = C_HI_FROM;
+    ctx.fillRect(fromF*SQ, fromR*SQ, SQ, SQ);
+    ctx.fillStyle = C_HI_TO;
+    ctx.fillRect(toF*SQ,   toR*SQ,   SQ, SQ);
+  }
+
+  // Pass 3: pieces via pre-rendered sprites (drawImage — no font, no shadow)
+  for (let r=0;r<8;r++) for (let f=0;f<8;f++) {
+    const p = board[r][f];
+    if (p && SPRITE[p]) ctx.drawImage(SPRITE[p], f*SQ, r*SQ);
+  }
+}
+
+// Convenience wrappers
 function drawBoard(ctx, board, fromR, fromF, toR, toF) {
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
-      const x = f*SQ, y = r*SQ;
-      ctx.fillStyle = (r+f)%2===0 ? C_LIGHT : C_DARK;
-      ctx.fillRect(x, y, SQ, SQ);
-      if (fromR !== undefined) {
-        if (r===fromR && f===fromF) { ctx.fillStyle=C_HI_FROM; ctx.fillRect(x,y,SQ,SQ); }
-        if (r===toR   && f===toF)   { ctx.fillStyle=C_HI_TO;   ctx.fillRect(x,y,SQ,SQ); }
-      }
-    }
-  }
-  ctx.font         = PIECE_FONT;
-  ctx.textAlign    = 'center';
-  ctx.textBaseline = 'middle';
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
-      const p = board[r][f];
-      if (!p) continue;
-      const isW = p[0]==='w';
-      ctx.shadowColor = isW ? 'rgba(0,0,0,0.65)' : 'rgba(255,255,255,0.08)';
-      ctx.shadowBlur  = 2;
-      ctx.fillStyle   = isW ? C_W : C_B;
-      ctx.fillText(GLYPHS[p]||'?', f*SQ+SQ/2, r*SQ+SQ/2+1);
-    }
-  }
-  ctx.shadowBlur = 0;
+  drawBoardToCtx(ctx, board,
+    fromR === undefined ? -1 : fromR,
+    fromF === undefined ? -1 : fromF,
+    toR   === undefined ? -1 : toR,
+    toF   === undefined ? -1 : toF);
 }
 
 function drawEmpty(ctx) {
-  for (let r=0;r<8;r++) for (let f=0;f<8;f++) {
-    ctx.fillStyle = (r+f)%2===0 ? '#181818' : '#141414';
-    ctx.fillRect(f*SQ,r*SQ,SQ,SQ);
+  if (EMPTY_BOARD_SPRITE) ctx.drawImage(EMPTY_BOARD_SPRITE, 0, 0);
+  else {
+    ctx.fillStyle = '#141414';
+    ctx.fillRect(0, 0, CANVAS_RES, CANVAS_RES);
   }
 }
 
@@ -303,6 +366,13 @@ let ctxs     = [];
 let stepIdx  = 0;
 let maxSteps = 0;
 
+// OPTIMISATION 3 — SPREAD REDRAWS ACROSS FRAMES
+// After a chess step fires, we push dirty board indices onto this queue.
+// mainTick drains DRAIN_PER_FRAME boards per frame so no single frame
+// does more than ~5ms of canvas work. Camera keeps moving while draining.
+const DRAIN_PER_FRAME = 80;  // boards redrawn per frame (tune up/down)
+let drawQueue = [];           // [{idx, fromR, fromF, toR, toF}]
+
 function initBoards(data) {
   openings = [...data].sort((a,b)=>a.rank-b.rank).slice(0, MAX_BOARDS);
   maxSteps = 0;
@@ -312,6 +382,7 @@ function initBoards(data) {
   boards = openings.map(o => ({
     moves: o.moves_uci || [],
     board: startPos(),
+    dirty: false,   // OPTIMISATION 2 — only redraw boards that changed
   }));
 }
 
@@ -362,25 +433,51 @@ function buildGrid() {
   document.getElementById('step-max').textContent = maxSteps;
 }
 
-function renderStep(step) {
-  for (let i = 0; i < openings.length; i++) {
-    const s = boards[i];
-    if (step === 0) {
-      s.board = startPos();
-      drawBoard(ctxs[i], s.board);
-      continue;
+// queueStep: called when a chess step fires.
+// Computes which boards need redrawing and adds them to the draw queue.
+// Does NOT draw anything — drawing happens in drainQueue() inside mainTick.
+function queueStep(step) {
+  drawQueue = []; // clear any leftover from previous step
+
+  if (step === 0) {
+    // Reset — all boards need redrawing
+    for (let i = 0; i < openings.length; i++) {
+      boards[i].board = startPos();
+      drawQueue.push({ idx: i, fromR: -1, fromF: -1, toR: -1, toF: -1 });
     }
-    const mv = s.moves[step - 1];
-    if (mv) {
-      const {fr,ff,tr,tf} = uciCoords(mv);
-      applyUCI(s.board, mv);
-      drawBoard(ctxs[i], s.board, fr, ff, tr, tf);
+    // Empty cells also need the empty sprite stamped (only once at init really)
+    for (let i = openings.length; i < MAX_BOARDS; i++) {
+      drawQueue.push({ idx: i, empty: true });
+    }
+  } else {
+    // OPTIMISATION 2: only queue boards that have a move at this step
+    for (let i = 0; i < openings.length; i++) {
+      const mv = boards[i].moves[step - 1];
+      if (mv) {
+        const {fr,ff,tr,tf} = uciCoords(mv);
+        applyUCI(boards[i].board, mv);
+        drawQueue.push({ idx: i, fromR: fr, fromF: ff, toR: tr, toF: tf });
+      }
+      // boards without a move at this step: no entry → no redraw → free
     }
   }
-  for (let i = openings.length; i < MAX_BOARDS; i++) {
-    if (step === 0) drawEmpty(ctxs[i]);
-  }
+
   document.getElementById('step-num').textContent = step;
+}
+
+// drainQueue: called every rAF frame, draws up to DRAIN_PER_FRAME boards
+function drainQueue() {
+  const end = Math.min(DRAIN_PER_FRAME, drawQueue.length);
+  for (let i = 0; i < end; i++) {
+    const job = drawQueue[i];
+    if (job.empty) {
+      drawEmpty(ctxs[job.idx]);
+    } else {
+      drawBoard(ctxs[job.idx], boards[job.idx].board,
+        job.fromR, job.fromF, job.toR, job.toF);
+    }
+  }
+  drawQueue.splice(0, end);
 }
 
 function kickProgress() {
@@ -420,23 +517,22 @@ let rafHandle = null;
 let prevT     = null;
 
 function startMainLoop() {
-  // Grab DOM refs now — guaranteed to exist
   camEl = document.getElementById('camera');
 
   const grid = document.getElementById('grid');
   maxDriftX = Math.max(0, grid.scrollWidth  - window.innerWidth);
   maxDriftY = Math.max(0, grid.scrollHeight - window.innerHeight);
 
-  // Start camera near centre
   camX = tgtX = maxDriftX / 2;
   camY = tgtY = maxDriftY / 3;
   if (Math.random() > 0.5) velX *= -1;
   if (Math.random() > 0.5) velY *= -1;
 
-  // Reset chess state
   stepIdx   = 0;
   stepAccum = 0;
-  renderStep(0);
+  drawQueue = [];
+
+  queueStep(0);
   kickProgress();
 
   prevT     = performance.now();
@@ -466,17 +562,19 @@ function mainTick(t) {
 
   camEl.style.transform = `translate3d(${-camX}px,${-camY}px,0)`;
 
-  // ── 2. Chess step timer (accumulator — fires every STEP_MS ms) ──
+  // ── 2. Drain the board draw queue (DRAIN_PER_FRAME boards per frame) ──
+  // This spreads canvas work across frames so no single frame spikes >16ms
+  if (drawQueue.length > 0) drainQueue();
+
+  // ── 3. Chess step timer (accumulator — fires every STEP_MS ms) ──
   stepAccum += dt * 1000;
   if (stepAccum >= STEP_MS) {
     stepAccum -= STEP_MS;
     stepIdx++;
     if (stepIdx > maxSteps) {
       stepIdx = 0;
-      renderStep(0);
-    } else {
-      renderStep(stepIdx);
     }
+    queueStep(stepIdx);
     kickProgress();
   }
 }
@@ -488,14 +586,15 @@ function launch(data) {
   document.getElementById('loading-screen').style.display = 'none';
   if (rafHandle) { cancelAnimationFrame(rafHandle); rafHandle = null; }
 
-  // Sync CSS variable with JS constant — one source of truth
   document.documentElement.style.setProperty('--cell-px', CELL_PX + 'px');
 
   initBoards(data);
   buildGrid();
 
-  // Wait two rAF frames so grid layout is fully computed before measuring
-  requestAnimationFrame(() => requestAnimationFrame(startMainLoop));
+  // Build GPU-resident piece sprites first, then start the loop
+  Promise.all([buildSprites(), buildBoardSprites()]).then(() => {
+    requestAnimationFrame(() => requestAnimationFrame(startMainLoop));
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
